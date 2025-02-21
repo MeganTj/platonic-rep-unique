@@ -1,0 +1,10 @@
+*.sh
+data/
+results/
+plots/
+*pt
+*egg-info/**
+**__pycache__/**
+*.pyc*
+.vscode/
+
