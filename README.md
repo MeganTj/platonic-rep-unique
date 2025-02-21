@@ -29,6 +29,10 @@ After extracting the features, you can compute the alignment score by
 bash measure_unique_alignment.sh
 ```
 
-The resulting alignment scores will be stored in `./results/alignment`
+By default the resulting features and alignment scores will be stored in `/scratch/platonic/results/u=${perturbation}_feature` and `/scratch/platonic/results/u=${perturbation}_alignment`repsectively for varying levels of `perturbation`. Then the results can be plotted as follows.
+
+```
+python plot_alignment.py --dataset minhuh/prh --subset wit_1024 --modelset val  --modality_x language --pool_x avg --modality_y vision --pool_y cls --features_dir  "/scratch/platonic/results/u={}_features" --align_dir  "/scratch/platonic/results/u={}_alignment" --plot_dir "./plots"
+```
 
 
