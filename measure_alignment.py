@@ -62,7 +62,7 @@ def compute_score(x_feats, y_feats, metric="mutual_knn", topk=10, normalize=True
     return best_alignment_score, best_alignment_indices
 
     
-def compute_alignment(x_feat_paths, y_feat_paths, metric, topk, precise=True):
+def compute_alignment(args, x_feat_paths, y_feat_paths, metric, topk, precise=True):
     """
     Args:
         x_feat_paths: list of paths to x features
@@ -181,7 +181,7 @@ if __name__ == "__main__":
     pprint(models_y_paths)
     
     print('\nmeasuring alignment')
-    alignment_scores, alignment_indices = compute_alignment(models_x_paths, models_y_paths, args.metric, args.topk, args.precise)
+    alignment_scores, alignment_indices = compute_alignment(args, models_x_paths, models_y_paths, args.metric, args.topk, args.precise)
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     np.save(save_path, {"scores": alignment_scores, "indices": alignment_indices})

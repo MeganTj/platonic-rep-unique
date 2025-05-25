@@ -1,0 +1,26 @@
+name: CLIPSup
+
+model:
+  _target_: clip_train.pl_modules.clip.CLIPSup
+
+  visual: # Vision model to be trained
+    _target_: timm.create_model
+    model_name: vit_base_patch32_clip_224.openai
+    pretrained: true
+
+  language: # Language model to be trained
+    _target_: clip_train.models.transformer.LanguageEncoder
+    model_name: clip-ViT-B-32-multilingual-v1
+    freeze: false
+    output_value: "sentence_embedding"
+    normalize_embeddings: true
+    use_dataset_cache: false
+  
+  clip_weight: 1.0
+  text_input_dim: 512
+
+  image_projection: null # Visual projection
+  optim_kwargs: null
+
+  text_projection: null # Language projection
+

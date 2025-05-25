@@ -16,10 +16,9 @@ from tasks import get_models
 from models import load_llm, load_tokenizer
 import json
 import utils 
-import pdb
 from perturbations import text_perturbation_list, image_perturbation_list, save_image
 
-def extract_llm_features(filenames, dataset, args, text_operations=[], text_percentage_perturbation=0.1):
+def extract_llm_features(filenames, dataset, args, perturbed_texts=None, text_operations=[], text_percentage_perturbation=0.1):
     """
     Extracts features from language models.
     Args:
@@ -29,7 +28,9 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
     """
 
     texts = [str(x['text'][args.caption_idx]) for x in dataset]
-    if len(text_operations) > 0:
+    if perturbed_texts is not None:
+        texts = perturbed_texts
+    elif len(text_operations) > 0:
         texts = text_perturbation_list(texts, text_operations, text_percentage_perturbation)
 
     for llm_model_name in filenames[::-1]:
@@ -49,19 +50,20 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
             continue
         
         language_model = load_llm(llm_model_name, qlora=args.qlora, force_download=args.force_download)
+        language_model.eval()
         llm_param_count = sum([p.numel() for p in language_model.parameters()])
         tokenizer = load_tokenizer(llm_model_name)
     
         tokens = tokenizer(texts, padding="longest", return_tensors="pt")        
         llm_feats, losses, bpb_losses = [], [], []
+        
 
         # hack to get around HF mapping data incorrectly when using model-parallel
         device = next(language_model.parameters()).device
-        dataset_len = len(dataset)
+        dataset_len = len(perturbed_texts) if perturbed_texts is not None else len(dataset)
         for i in trange(0, dataset_len, args.batch_size):
             # get embedding cuda device
             token_inputs = {k: v[i:i+args.batch_size].to(device).long() for (k, v) in tokens.items()}
-
             with torch.no_grad():
                 if "olmo" in llm_model_name.lower():
                     llm_output = language_model(
@@ -74,13 +76,18 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
                         input_ids=token_inputs["input_ids"],
                         attention_mask=token_inputs["attention_mask"],
                     )
-
+                if torch.stack(llm_output["hidden_states"]).isnan().any():
+                    import pdb
+                    pdb.set_trace()
                 loss, avg_loss = utils.cross_entropy_loss(token_inputs, llm_output)
                 losses.extend(avg_loss.cpu())
                 
                 bpb = utils.cross_entropy_to_bits_per_unit(loss.cpu(), texts[i:i+args.batch_size], unit="byte")
                 bpb_losses.extend(bpb)
-                
+                if bpb.isnan().any():
+                    import pdb
+                    pdb.set_trace()
+
                 # make sure to do all the processing in cpu to avoid memory problems
                 if args.pool == 'avg':
                     feats = torch.stack(llm_output["hidden_states"]).permute(1, 0, 2, 3)
@@ -93,7 +100,8 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
                     raise NotImplementedError(f"unknown pooling {args.pool}")
                 llm_feats.append(feats.cpu())
 
-        print(f"average loss:\t{torch.stack(losses).mean().item()}")
+        all_losses = torch.stack(losses)
+        print(f"average loss:\t{all_losses.mean().item()}")
         print(torch.cat(llm_feats).shape)
         save_dict = {
             "feats": torch.cat(llm_feats).cpu(),
@@ -102,7 +110,6 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
             "loss": torch.stack(losses).mean(),
             "bpb": torch.stack(bpb_losses).mean(),
         }
-
         torch.save(save_dict, save_path)
 
         del language_model, tokenizer, llm_feats, llm_output
@@ -112,7 +119,7 @@ def extract_llm_features(filenames, dataset, args, text_operations=[], text_perc
     return
     
         
-def extract_lvm_features(filenames, dataset, args, image_perturbations=None, noise_percentage=0.1, debug_dir=None):
+def extract_lvm_features(filenames, dataset, args, perturbed_indices=None, image_perturbations=None, noise_percentage=0.1, debug_dir=None):
     """
     Extracts features from vision models.
     Args:
@@ -121,6 +128,9 @@ def extract_lvm_features(filenames, dataset, args, image_perturbations=None, noi
         args: argparse arguments
     """
     assert args.pool == 'cls', "pooling is not supported for lvm features"
+    if perturbed_indices is not None:
+        dataset = [dataset[j] for j in perturbed_indices]
+        assert image_perturbations is None
     for lvm_model_name in filenames:
         assert 'vit' in lvm_model_name, "only vision transformers are supported"
         
@@ -192,7 +202,7 @@ if __name__ == "__main__":
     parser.add_argument("--force_download", action="store_true")
     parser.add_argument("--force_remake",   action="store_true")
     parser.add_argument("--num_samples",    type=int, default=1024)
-    parser.add_argument("--batch_size",     type=int, default=4)
+    parser.add_argument("--batch_size",     type=int, default=2)
     parser.add_argument("--pool",           type=str, default='avg', choices=['avg', 'cls'])
     parser.add_argument("--prompt",         action="store_true")
     parser.add_argument("--dataset",        type=str, default="minhuh/prh")
@@ -203,6 +213,13 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir",     type=str, default="./results/features")
     parser.add_argument("--debug_dir",     type=str, default=None)
     parser.add_argument("--qlora",          action="store_true")
+    # Noise Arguments
+    parser.add_argument(
+        "--json_perturbations",
+        type=str,   # Ensure values are treated as strings
+        help="Path to perturbations",
+        default=None
+    )
     # Noise Arguments
     parser.add_argument(
         "--text_operations",
@@ -226,10 +243,24 @@ if __name__ == "__main__":
     
     # load dataset once outside    
     dataset = load_dataset(args.dataset, revision=args.subset, split='train')
+    perturbed_texts, perturbed_indices = None, None
+    if args.json_perturbations is not None:
+        print("Loading perturbations")
+        perturbed_texts = []
+        perturbed_indices = []
+        with open(args.json_perturbations) as f:
+            captions = json.load(f)
+            for dct in captions:
+                for index, caption_dct in dct.items():
+                    idx = int(index[len("Index - "):])
+                    for key, perturbed_caption in caption_dct["sentences"].items():
+                        if f"- {int(args.text_percentage_perturbation)}%" in key:
+                            perturbed_indices.append(idx)
+                            perturbed_texts.append(perturbed_caption)
     if args.modality in ["all", "language"]:
         # extract all language model features
-        extract_llm_features(llm_models, dataset, args, text_operations=args.text_operations, text_percentage_perturbation=args.text_percentage_perturbation)
+        extract_llm_features(llm_models, dataset, args, perturbed_texts=perturbed_texts, text_operations=args.text_operations, text_percentage_perturbation=args.text_percentage_perturbation)
     
     if args.modality in ["all", "vision"]:
         # extract all vision model features
-        extract_lvm_features(lvm_models, dataset, args, image_perturbations=args.image_perturbations, noise_percentage=args.noise_percentage, debug_dir=args.debug_dir)
+        extract_lvm_features(lvm_models, dataset, args, perturbed_indices=perturbed_indices, image_perturbations=args.image_perturbations, noise_percentage=args.noise_percentage, debug_dir=args.debug_dir)
